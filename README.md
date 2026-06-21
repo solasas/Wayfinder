@@ -17,7 +17,7 @@ Pick two points on the map → the backend computes the actual shortest driving 
 | Real-world data pipeline (OpenStreetMap) | `OsmDataFetcher`, `OsmParser`, `GraphImporter` |
 | REST API design (Spring Boot) | `PathController`, `RegionController` |
 | In-memory vs DB query tradeoffs | `GraphService.java` |
-| Unit testing without infrastructure | `DijkstraServiceTest.java` |
+| Unit testing without infrastructure | `DijkstraServiceTest.java`, `SnapServiceTest.java` |
 
 ---
 
@@ -172,7 +172,8 @@ map_shortest_path_finder/
 │
 └── src/main/java/com/sashank/.../
     ├── config/
-    │   └── RegionConfig.java            # Bounding box loaded from application.properties
+    │   ├── RegionConfig.java            # Bounding box loaded from application.properties
+    │   └── CorsConfig.java              # Allows React frontend (localhost:3000/5173) to call the API
     │
     ├── model/
     │   ├── Node.java                    # JPA entity: graph vertex (osm_id, lat, lng)
@@ -184,6 +185,7 @@ map_shortest_path_finder/
     │
     ├── pipeline/                        # Data import — runs once, not part of normal startup
     │   ├── OsmDataFetcher.java          # Calls Overpass API
+    │   ├── OsmResponse.java             # Jackson mapping for the Overpass API JSON response
     │   ├── OsmParser.java               # Converts raw OSM JSON → graph nodes + edges
     │   └── GraphImporter.java           # CommandLineRunner (@Profile("import"))
     │
