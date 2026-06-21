@@ -271,9 +271,3 @@ When Dijkstra finds a shorter path to a node, it adds a new entry to the heap ra
 
 ---
 
-## What's Next (Phase 3)
-
-- React + Leaflet.js frontend with OpenStreetMap tiles
-- Click-to-pin or search-box to set start and end points
-- Route drawn as a polyline on the map
-- Distance and estimated travel time displayed in a side panel
