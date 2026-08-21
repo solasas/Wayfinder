@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -186,5 +187,93 @@ class DijkstraServiceTest {
         assertEquals(List.of(1L, 3L, 4L), byTime.get().nodeIds());
         assertEquals(10.0, byTime.get().totalDistanceMeters(), 1e-9);
         assertEquals(2.0, byTime.get().totalTimeSeconds(), 1e-9);
+    }
+
+    // ─── Reachability with a cutoff (isochrone traversal) ────────────────────
+
+    @Test
+    void findsAllNodesWithinCutoff() {
+        // 1→2: 4, 2→3: 3, 1→3: 10 (direct)
+        Map<Long, List<GraphService.Neighbor>> adj = Map.of(
+            1L, List.of(nb(2L, 4.0), nb(3L, 10.0)),
+            2L, List.of(nb(3L, 3.0)),
+            3L, List.of()
+        );
+
+        // Cutoff 5: node 2 is reachable (cost 4); node 3 would need 7 via 2 or 10 direct.
+        Set<DijkstraService.Reachable> reached =
+            dijkstra.findReachableNodes(adj, 1L, 5.0, DijkstraService.WeightType.DISTANCE);
+
+        assertEquals(
+            Set.of(new DijkstraService.Reachable(1L, 0.0),
+                   new DijkstraService.Reachable(2L, 4.0)),
+            reached);
+    }
+
+    @Test
+    void raisingCutoffRevealsFartherNodes() {
+        Map<Long, List<GraphService.Neighbor>> adj = Map.of(
+            1L, List.of(nb(2L, 4.0), nb(3L, 10.0)),
+            2L, List.of(nb(3L, 3.0)),
+            3L, List.of()
+        );
+
+        // Cutoff 10: node 3 is now reachable via 2 (cost 7), cheaper than the direct edge (10).
+        Set<DijkstraService.Reachable> reached =
+            dijkstra.findReachableNodes(adj, 1L, 10.0, DijkstraService.WeightType.DISTANCE);
+
+        assertEquals(
+            Set.of(new DijkstraService.Reachable(1L, 0.0),
+                   new DijkstraService.Reachable(2L, 4.0),
+                   new DijkstraService.Reachable(3L, 7.0)),
+            reached);
+    }
+
+    @Test
+    void sourceAlwaysIncludedEvenWithZeroCutoff() {
+        Map<Long, List<GraphService.Neighbor>> adj = Map.of(
+            1L, List.of(nb(2L, 4.0)),
+            2L, List.of()
+        );
+
+        Set<DijkstraService.Reachable> reached =
+            dijkstra.findReachableNodes(adj, 1L, 0.0, DijkstraService.WeightType.DISTANCE);
+
+        assertEquals(Set.of(new DijkstraService.Reachable(1L, 0.0)), reached);
+    }
+
+    @Test
+    void returnsEmptySetWhenSourceNodeMissing() {
+        Map<Long, List<GraphService.Neighbor>> adj = Map.of(
+            2L, List.of()
+        );
+
+        Set<DijkstraService.Reachable> reached =
+            dijkstra.findReachableNodes(adj, 99L, 100.0, DijkstraService.WeightType.DISTANCE);
+
+        assertTrue(reached.isEmpty());
+    }
+
+    @Test
+    void distanceAndTimeCutoffsReachDifferentSets() {
+        // 1→2: 1m / 100s,  1→3: 5m / 1s
+        Map<Long, List<GraphService.Neighbor>> adj = Map.of(
+            1L, List.of(nb(2L, 1.0, 100.0), nb(3L, 5.0, 1.0)),
+            2L, List.of(),
+            3L, List.of()
+        );
+
+        // Distance cutoff 5: both 2 (1m) and 3 (5m) are within budget.
+        Set<DijkstraService.Reachable> byDistance =
+            dijkstra.findReachableNodes(adj, 1L, 5.0, DijkstraService.WeightType.DISTANCE);
+        assertEquals(3, byDistance.size());
+
+        // Time cutoff 5: only node 3 (1s) is within budget; node 2 costs 100s.
+        Set<DijkstraService.Reachable> byTime =
+            dijkstra.findReachableNodes(adj, 1L, 5.0, DijkstraService.WeightType.TIME);
+        assertEquals(
+            Set.of(new DijkstraService.Reachable(1L, 0.0),
+                   new DijkstraService.Reachable(3L, 1.0)),
+            byTime);
     }
 }

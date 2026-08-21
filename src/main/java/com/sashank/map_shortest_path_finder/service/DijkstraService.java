@@ -4,6 +4,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.*;
 import java.util.function.ToDoubleFunction;
+import java.util.stream.Collectors;
 
 /**
  * Dijkstra's shortest-path algorithm on an in-memory weighted directed graph.
@@ -42,6 +43,20 @@ public class DijkstraService {
 
         double costOf(GraphService.Neighbor neighbor) {
             return extractor.applyAsDouble(neighbor);
+        }
+
+        /**
+         * Parses an `optimize` request value ("distance" or "time", case-insensitive).
+         *
+         * @throws IllegalArgumentException for any other value
+         */
+        public static WeightType fromQueryParam(String value) {
+            return switch (value.toLowerCase()) {
+                case "distance" -> DISTANCE;
+                case "time" -> TIME;
+                default -> throw new IllegalArgumentException(
+                    "Invalid optimize value '" + value + "': must be 'distance' or 'time'");
+            };
         }
     }
 
@@ -130,5 +145,64 @@ public class DijkstraService {
         Collections.reverse(path);
 
         return Optional.of(new PathResult(path, distanceMetersAcc.get(targetId), timeSecondsAcc.get(targetId)));
+    }
+
+    /** A node reached within the cutoff, and the cumulative cost (in weightType's units) to reach it. */
+    public record Reachable(long nodeId, double cost) {}
+
+    /**
+     * Single-source traversal with no target: explores outward from source and returns
+     * every node reachable within {@code cutoff}, along with the cost to reach each one.
+     * Used for isochrones ("everywhere reachable in N minutes").
+     *
+     * Same min-heap approach as findShortestPath, but instead of stopping at a target it
+     * stops expanding once the tentative cost would exceed the cutoff — edges beyond the
+     * cutoff are simply never relaxed, so the search naturally stays within the budget
+     * rather than exploring the whole graph and filtering afterwards.
+     *
+     * @param adjacency  the graph (nodeId → list of outgoing neighbours)
+     * @param sourceId   start node DB id
+     * @param cutoff     maximum cumulative cost (inclusive), in weightType's units
+     * @param weightType which weight to accumulate (distance or time)
+     * @return every reached node (including the source, at cost 0) with its cumulative cost
+     */
+    public Set<Reachable> findReachableNodes(
+            Map<Long, List<GraphService.Neighbor>> adjacency,
+            long sourceId,
+            double cutoff,
+            WeightType weightType) {
+
+        if (!adjacency.containsKey(sourceId)) {
+            return Set.of();
+        }
+
+        Map<Long, Double> dist = new HashMap<>();
+
+        record Entry(double d, long nodeId) implements Comparable<Entry> {
+            public int compareTo(Entry o) { return Double.compare(this.d, o.d); }
+        }
+
+        PriorityQueue<Entry> pq = new PriorityQueue<>();
+        dist.put(sourceId, 0.0);
+        pq.offer(new Entry(0.0, sourceId));
+
+        while (!pq.isEmpty()) {
+            Entry cur = pq.poll();
+
+            // Lazy deletion: skip stale heap entries, same as findShortestPath.
+            if (cur.d() > dist.getOrDefault(cur.nodeId(), Double.MAX_VALUE)) continue;
+
+            for (GraphService.Neighbor nb : adjacency.getOrDefault(cur.nodeId(), List.of())) {
+                double newDist = cur.d() + weightType.costOf(nb);
+                if (newDist <= cutoff && newDist < dist.getOrDefault(nb.toNodeId(), Double.MAX_VALUE)) {
+                    dist.put(nb.toNodeId(), newDist);
+                    pq.offer(new Entry(newDist, nb.toNodeId()));
+                }
+            }
+        }
+
+        return dist.entrySet().stream()
+            .map(e -> new Reachable(e.getKey(), e.getValue()))
+            .collect(Collectors.toUnmodifiableSet());
     }
 }

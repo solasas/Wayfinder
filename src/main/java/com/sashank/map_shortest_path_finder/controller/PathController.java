@@ -46,7 +46,7 @@ public class PathController {
         Node startNode = snapService.snapToNearest(req.start().lat(), req.start().lng());
         Node endNode   = snapService.snapToNearest(req.end().lat(),   req.end().lng());
 
-        DijkstraService.WeightType weightType = parseWeightType(req.optimize());
+        DijkstraService.WeightType weightType = DijkstraService.WeightType.fromQueryParam(req.optimize());
 
         // ── Run Dijkstra ──────────────────────────────────────────────────────
         DijkstraService.PathResult result =
@@ -69,14 +69,5 @@ public class PathController {
         long estimatedTimeSecs = Math.round(result.totalTimeSeconds());
 
         return new PathResponse(polyline, result.totalDistanceMeters(), estimatedTimeSecs);
-    }
-
-    private DijkstraService.WeightType parseWeightType(String optimize) {
-        return switch (optimize.toLowerCase()) {
-            case "distance" -> DijkstraService.WeightType.DISTANCE;
-            case "time" -> DijkstraService.WeightType.TIME;
-            default -> throw new IllegalArgumentException(
-                "Invalid optimize value '" + optimize + "': must be 'distance' or 'time'");
-        };
     }
 }
