@@ -290,9 +290,3 @@ Each edge stores `distance_meters` and `speed_kmh`; `timeSeconds` is derived fro
 
 ---
 
-## What's Next (Phase 3)
-
-- React + Leaflet.js frontend with OpenStreetMap tiles
-- Click-to-pin or search-box to set start and end points
-- Route drawn as a polyline on the map
-- Distance and estimated travel time displayed in a side panel
