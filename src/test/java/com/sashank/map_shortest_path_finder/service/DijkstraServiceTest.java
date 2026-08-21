@@ -276,4 +276,139 @@ class DijkstraServiceTest {
                    new DijkstraService.Reachable(3L, 1.0)),
             byTime);
     }
+
+    // ─── Bidirectional Dijkstra: reverse-adjacency helper ─────────────────────
+
+    @Test
+    void buildReverseAdjacencyFlipsEveryEdge() {
+        // Plain one-way chain: 1→2 (5), 2→3 (2). No edges back.
+        Map<Long, List<GraphService.Neighbor>> adj = Map.of(
+            1L, List.of(nb(2L, 5.0)),
+            2L, List.of(nb(3L, 2.0)),
+            3L, List.of()
+        );
+
+        Map<Long, List<GraphService.Neighbor>> reversed = DijkstraService.buildReverseAdjacency(adj);
+
+        assertEquals(Set.of(1L, 2L, 3L), reversed.keySet());
+        assertEquals(List.of(), reversed.get(1L));
+        assertEquals(List.of(nb(1L, 5.0)), reversed.get(2L));
+        assertEquals(List.of(nb(2L, 2.0)), reversed.get(3L));
+    }
+
+    // ─── Bidirectional Dijkstra: matches findShortestPath exactly ─────────────
+
+    @Test
+    void bidirectionalMatchesSingleDirectionOnIndirectPathGraph() {
+        // Same graph as prefersLowerCostIndirectPath: 1→3 direct costs 10;
+        // via 2 it costs 4+3 = 7 → both algorithms must pick 1→2→3.
+        Map<Long, List<GraphService.Neighbor>> adj = Map.of(
+            1L, List.of(nb(2L, 4.0), nb(3L, 10.0)),
+            2L, List.of(nb(3L, 3.0)),
+            3L, List.of()
+        );
+
+        Optional<DijkstraService.PathResult> single =
+            dijkstra.findShortestPath(adj, 1L, 3L, DijkstraService.WeightType.DISTANCE);
+        Optional<DijkstraService.PathResult> bidirectional =
+            dijkstra.findShortestPathBidirectional(adj, 1L, 3L, DijkstraService.WeightType.DISTANCE);
+
+        assertTrue(single.isPresent());
+        assertTrue(bidirectional.isPresent());
+        assertEquals(single.get().nodeIds(), bidirectional.get().nodeIds());
+        assertEquals(single.get().totalDistanceMeters(), bidirectional.get().totalDistanceMeters(), 1e-9);
+        assertEquals(single.get().totalTimeSeconds(), bidirectional.get().totalTimeSeconds(), 1e-9);
+
+        // Hand-traced for this specific graph: both settle exactly {1, 2, 3-or-meeting-node}.
+        assertEquals(3, single.get().nodesExpanded());
+        assertEquals(3, bidirectional.get().nodesExpanded());
+    }
+
+    @Test
+    void bidirectionalMatchesSingleDirectionOnDiamondGraph() {
+        // Same graph as findsShortestAmongMultiplePaths: 1 → {2,3} → 4,
+        // shortest is 1→3→4 (cost 7) over 1→2→4 (cost 11).
+        Map<Long, List<GraphService.Neighbor>> adj = Map.of(
+            1L, List.of(nb(2L, 1.0), nb(3L, 5.0)),
+            2L, List.of(nb(4L, 10.0)),
+            3L, List.of(nb(4L, 2.0)),
+            4L, List.of()
+        );
+
+        Optional<DijkstraService.PathResult> single =
+            dijkstra.findShortestPath(adj, 1L, 4L, DijkstraService.WeightType.DISTANCE);
+        Optional<DijkstraService.PathResult> bidirectional =
+            dijkstra.findShortestPathBidirectional(adj, 1L, 4L, DijkstraService.WeightType.DISTANCE);
+
+        assertTrue(single.isPresent());
+        assertTrue(bidirectional.isPresent());
+        assertEquals(List.of(1L, 3L, 4L), bidirectional.get().nodeIds());
+        assertEquals(single.get().nodeIds(), bidirectional.get().nodeIds());
+        assertEquals(single.get().totalDistanceMeters(), bidirectional.get().totalDistanceMeters(), 1e-9);
+        assertEquals(single.get().totalTimeSeconds(), bidirectional.get().totalTimeSeconds(), 1e-9);
+        assertTrue(bidirectional.get().nodesExpanded() > 0);
+    }
+
+    @Test
+    void bidirectionalMatchesSingleDirectionWhenOptimizingForTime() {
+        // Same diverging distance/time graph as distanceAndTimeOptimizationCanChooseDifferentPaths.
+        Map<Long, List<GraphService.Neighbor>> adj = Map.of(
+            1L, List.of(nb(2L, 1.0, 100.0), nb(3L, 5.0, 1.0)),
+            2L, List.of(nb(4L, 1.0, 100.0)),
+            3L, List.of(nb(4L, 5.0, 1.0)),
+            4L, List.of()
+        );
+
+        Optional<DijkstraService.PathResult> single =
+            dijkstra.findShortestPath(adj, 1L, 4L, DijkstraService.WeightType.TIME);
+        Optional<DijkstraService.PathResult> bidirectional =
+            dijkstra.findShortestPathBidirectional(adj, 1L, 4L, DijkstraService.WeightType.TIME);
+
+        assertTrue(single.isPresent());
+        assertTrue(bidirectional.isPresent());
+        assertEquals(List.of(1L, 3L, 4L), bidirectional.get().nodeIds());
+        assertEquals(single.get().nodeIds(), bidirectional.get().nodeIds());
+        assertEquals(single.get().totalDistanceMeters(), bidirectional.get().totalDistanceMeters(), 1e-9);
+        assertEquals(single.get().totalTimeSeconds(), bidirectional.get().totalTimeSeconds(), 1e-9);
+    }
+
+    @Test
+    void bidirectionalSourceEqualsTargetReturnsZeroDistanceSingleNode() {
+        Map<Long, List<GraphService.Neighbor>> adj = Map.of(
+            1L, List.of(nb(2L, 5.0)),
+            2L, List.of()
+        );
+
+        Optional<DijkstraService.PathResult> result =
+            dijkstra.findShortestPathBidirectional(adj, 1L, 1L, DijkstraService.WeightType.DISTANCE);
+
+        assertTrue(result.isPresent());
+        assertEquals(List.of(1L), result.get().nodeIds());
+        assertEquals(0.0, result.get().totalDistanceMeters(), 1e-9);
+        assertEquals(0.0, result.get().totalTimeSeconds(), 1e-9);
+        assertEquals(0, result.get().nodesExpanded());
+    }
+
+    @Test
+    void bidirectionalReturnsEmptyWhenNoPathExists() {
+        Map<Long, List<GraphService.Neighbor>> adj = Map.of(
+            1L, List.of(),
+            2L, List.of()
+        );
+
+        Optional<DijkstraService.PathResult> result =
+            dijkstra.findShortestPathBidirectional(adj, 1L, 2L, DijkstraService.WeightType.DISTANCE);
+
+        assertTrue(result.isEmpty());
+    }
+
+    @Test
+    void bidirectionalReturnsEmptyWhenSourceOrTargetNodeMissing() {
+        Map<Long, List<GraphService.Neighbor>> adj = Map.of(
+            1L, List.of()
+        );
+
+        assertTrue(dijkstra.findShortestPathBidirectional(adj, 99L, 1L, DijkstraService.WeightType.DISTANCE).isEmpty());
+        assertTrue(dijkstra.findShortestPathBidirectional(adj, 1L, 99L, DijkstraService.WeightType.DISTANCE).isEmpty());
+    }
 }
