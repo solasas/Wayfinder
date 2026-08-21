@@ -1,13 +1,14 @@
 services:
   postgres:
     image: postgis/postgis:17-3.5
+    platform: linux/amd64   # this tag only publishes an amd64 manifest; runs emulated on Apple Silicon
     container_name: map-postgres
     environment:
       POSTGRES_DB: mapdb
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
     ports:
-      - "5432:5432"
+      - "5433:5432"   # host 5433 to avoid clashing with a native Postgres on 5432
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql

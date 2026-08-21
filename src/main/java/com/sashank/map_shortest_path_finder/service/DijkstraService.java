@@ -3,6 +3,7 @@ package com.sashank.map_shortest_path_finder.service;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
+import java.util.function.ToDoubleFunction;
 
 /**
  * Dijkstra's shortest-path algorithm on an in-memory weighted directed graph.
@@ -23,7 +24,26 @@ import java.util.*;
 @Service
 public class DijkstraService {
 
-    public record PathResult(List<Long> nodeIds, double totalDistanceMeters) {}
+    public record PathResult(List<Long> nodeIds, double totalDistanceMeters, double totalTimeSeconds) {}
+
+    /**
+     * Which of a Neighbor's two weights Dijkstra should minimise. Kept as a plain
+     * enum (not GraphService) so DijkstraService stays a pure algorithm.
+     */
+    public enum WeightType {
+        DISTANCE(GraphService.Neighbor::distanceMeters),
+        TIME(GraphService.Neighbor::timeSeconds);
+
+        private final ToDoubleFunction<GraphService.Neighbor> extractor;
+
+        WeightType(ToDoubleFunction<GraphService.Neighbor> extractor) {
+            this.extractor = extractor;
+        }
+
+        double costOf(GraphService.Neighbor neighbor) {
+            return extractor.applyAsDouble(neighbor);
+        }
+    }
 
     /**
      * Finds the shortest path from source to target in the given adjacency map.
@@ -31,26 +51,33 @@ public class DijkstraService {
      * @param adjacency  the graph (nodeId → list of outgoing neighbours)
      * @param sourceId   start node DB id
      * @param targetId   end node DB id
+     * @param weightType which weight to minimise (distance or time)
      * @return the shortest path, or empty if no path exists
      */
     public Optional<PathResult> findShortestPath(
             Map<Long, List<GraphService.Neighbor>> adjacency,
             long sourceId,
-            long targetId) {
+            long targetId,
+            WeightType weightType) {
 
         if (!adjacency.containsKey(sourceId) || !adjacency.containsKey(targetId)) {
             return Optional.empty();
         }
 
         if (sourceId == targetId) {
-            return Optional.of(new PathResult(List.of(sourceId), 0.0));
+            return Optional.of(new PathResult(List.of(sourceId), 0.0, 0.0));
         }
 
         // ── Initialise ───────────────────────────────────────────────────────
-        // dist[n] = best known distance from source to n
+        // dist[n] = best known cost from source to n, in the units of weightType
         Map<Long, Double> dist = new HashMap<>();
         // prev[n] = which node we came from on the best path to n (for reconstruction)
         Map<Long, Long> prev = new HashMap<>();
+        // Running totals for the *other* weight along the best-known path to n,
+        // so the response can report both distance and time regardless of which
+        // one was optimised for.
+        Map<Long, Double> distanceMetersAcc = new HashMap<>();
+        Map<Long, Double> timeSecondsAcc = new HashMap<>();
 
         // Min-heap entry: [distanceAsLongBits, nodeId]
         // Encoding distance as a long lets us use a primitive array, but a record is clearer:
@@ -60,6 +87,8 @@ public class DijkstraService {
 
         PriorityQueue<Entry> pq = new PriorityQueue<>();
         dist.put(sourceId, 0.0);
+        distanceMetersAcc.put(sourceId, 0.0);
+        timeSecondsAcc.put(sourceId, 0.0);
         pq.offer(new Entry(0.0, sourceId));
 
         // ── Main loop ────────────────────────────────────────────────────────
@@ -73,10 +102,12 @@ public class DijkstraService {
             if (cur.nodeId() == targetId) break; // target settled — stop early
 
             for (GraphService.Neighbor nb : adjacency.getOrDefault(cur.nodeId(), List.of())) {
-                double newDist = cur.d() + nb.weight();
+                double newDist = cur.d() + weightType.costOf(nb);
                 if (newDist < dist.getOrDefault(nb.toNodeId(), Double.MAX_VALUE)) {
                     dist.put(nb.toNodeId(), newDist);
                     prev.put(nb.toNodeId(), cur.nodeId());
+                    distanceMetersAcc.put(nb.toNodeId(), distanceMetersAcc.get(cur.nodeId()) + nb.distanceMeters());
+                    timeSecondsAcc.put(nb.toNodeId(), timeSecondsAcc.get(cur.nodeId()) + nb.timeSeconds());
                     pq.offer(new Entry(newDist, nb.toNodeId()));
                 }
             }
@@ -98,6 +129,6 @@ public class DijkstraService {
         path.add(sourceId);
         Collections.reverse(path);
 
-        return Optional.of(new PathResult(path, dist.get(targetId)));
+        return Optional.of(new PathResult(path, distanceMetersAcc.get(targetId), timeSecondsAcc.get(targetId)));
     }
 }

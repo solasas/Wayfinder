@@ -31,9 +31,13 @@ public class Edge {
     @Column(name = "to_node_id", nullable = false)
     private Long toNodeId;
 
-    /** Haversine distance in metres. Can be replaced with travel-time later. */
-    @Column(nullable = false)
-    private Double weight;
+    /** Haversine distance in metres. */
+    @Column(name = "distance_meters", nullable = false)
+    private Double distanceMeters;
+
+    /** Typical free-flow speed for this road segment, derived from the OSM `highway` tag. */
+    @Column(name = "speed_kmh", nullable = false)
+    private Double speedKmh;
 
     /** OSM way ID this segment was derived from. Useful for debugging imports. */
     @Column(name = "osm_way_id")

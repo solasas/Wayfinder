@@ -35,14 +35,17 @@ FOR EACH ROW EXECUTE FUNCTION sync_node_geom();
 
 -- ─── EDGES ────────────────────────────────────────────────────────────────────
 -- Each row is a directed road segment between two graph nodes.
--- Bidirectional roads produce two rows (A→B and B→A) with the same weight.
--- weight = Haversine distance in metres (can be swapped for travel time later).
+-- Bidirectional roads produce two rows (A→B and B→A) with the same distance/speed.
+-- distance_meters = Haversine distance. speed_kmh = typical speed for the OSM
+-- `highway` tag (see OsmParser). Travel-time weight is derived from the two at
+-- graph-load time rather than stored, so it never needs a migration to retune.
 CREATE TABLE IF NOT EXISTS edges (
-    id           BIGSERIAL PRIMARY KEY,
-    from_node_id BIGINT NOT NULL REFERENCES nodes(id),
-    to_node_id   BIGINT NOT NULL REFERENCES nodes(id),
-    weight       DOUBLE PRECISION NOT NULL,
-    osm_way_id   BIGINT           -- original OSM way ID; useful for debugging imports
+    id              BIGSERIAL PRIMARY KEY,
+    from_node_id    BIGINT NOT NULL REFERENCES nodes(id),
+    to_node_id      BIGINT NOT NULL REFERENCES nodes(id),
+    distance_meters DOUBLE PRECISION NOT NULL,
+    speed_kmh       DOUBLE PRECISION NOT NULL,
+    osm_way_id      BIGINT           -- original OSM way ID; useful for debugging imports
 );
 
 -- Dijkstra always queries "give me all edges leaving node X", so index from_node_id.

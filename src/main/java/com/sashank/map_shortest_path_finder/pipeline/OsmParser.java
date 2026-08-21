@@ -17,8 +17,10 @@ import java.util.stream.Collectors;
  *   - Bidirectional roads → two edges (A→B and B→A), same weight.
  *   - One-way roads (oneway=yes, or motorways) → one edge in the forward direction.
  *
- * Weight = Haversine distance in metres. This gives shortest-distance routing.
- * To switch to shortest-time, multiply by (1 / speed_limit_for_highway_type).
+ * Each edge carries two independent weights: distanceMeters (Haversine) and a
+ * typical speedKmh looked up from the way's `highway` tag. GraphService derives
+ * travel-time weights from these at load time, so both distance- and time-based
+ * routing are available without re-parsing OSM data.
  *
  * Note on graph size:
  *   The "every OSM node = graph node" approach is simple and works well for
@@ -32,6 +34,16 @@ public class OsmParser {
 
     private static final Logger log = LoggerFactory.getLogger(OsmParser.class);
 
+    /** Typical free-flow speed by OSM `highway` tag value. Unknown tags fall back to DEFAULT_SPEED_KMH. */
+    private static final Map<String, Double> HIGHWAY_SPEED_KMH = Map.of(
+        "motorway",    80.0,
+        "primary",     60.0,
+        "secondary",   50.0,
+        "residential", 30.0,
+        "service",     15.0
+    );
+    private static final double DEFAULT_SPEED_KMH = 40.0;
+
     /**
      * The output of parsing: Node entities ready to be saved, plus edge descriptors
      * that reference nodes by their OSM ID (DB primary keys aren't assigned yet).
@@ -42,7 +54,7 @@ public class OsmParser {
      * An edge described in terms of OSM IDs, before the DB assigns primary keys.
      * GraphImporter translates these into Edge entities once nodes are saved.
      */
-    public record ParsedEdge(long fromOsmId, long toOsmId, double weight, long osmWayId) {}
+    public record ParsedEdge(long fromOsmId, long toOsmId, double distanceMeters, double speedKmh, long osmWayId) {}
 
     public ParsedGraph parse(OsmResponse response) {
         // ── Step 1: split the flat element list into nodes and ways ──────────
@@ -81,6 +93,7 @@ public class OsmParser {
         List<ParsedEdge> edges = new ArrayList<>();
         for (OsmResponse.OsmElement way : ways) {
             boolean oneway = isOneway(way.getTags());
+            double speedKmh = speedKmhFor(way.getTags());
             List<Long> refs = way.getNodes();
 
             for (int i = 0; i < refs.size() - 1; i++) {
@@ -91,9 +104,9 @@ public class OsmParser {
                 double dist = haversine(from.getLat(), from.getLng(),
                                         to.getLat(),   to.getLng());
 
-                edges.add(new ParsedEdge(from.getOsmId(), to.getOsmId(), dist, way.getId()));
+                edges.add(new ParsedEdge(from.getOsmId(), to.getOsmId(), dist, speedKmh, way.getId()));
                 if (!oneway) {
-                    edges.add(new ParsedEdge(to.getOsmId(), from.getOsmId(), dist, way.getId()));
+                    edges.add(new ParsedEdge(to.getOsmId(), from.getOsmId(), dist, speedKmh, way.getId()));
                 }
             }
         }
@@ -113,6 +126,15 @@ public class OsmParser {
         String highway = tags.get("highway");
         return "yes".equals(val) || "1".equals(val) || "true".equals(val)
             || "motorway".equals(highway) || "motorway_link".equals(highway);
+    }
+
+    /**
+     * Looks up a typical free-flow speed for the way's `highway` tag.
+     * Unrecognised or missing tags fall back to DEFAULT_SPEED_KMH.
+     */
+    private double speedKmhFor(Map<String, String> tags) {
+        if (tags == null) return DEFAULT_SPEED_KMH;
+        return HIGHWAY_SPEED_KMH.getOrDefault(tags.get("highway"), DEFAULT_SPEED_KMH);
     }
 
     /**

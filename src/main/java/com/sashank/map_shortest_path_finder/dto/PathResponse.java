@@ -7,7 +7,7 @@ import java.util.List;
  *
  * path              — ordered lat/lng points forming the route; draw these as a polyline.
  * distanceMeters    — total Haversine distance along the path.
- * estimatedTimeSecs — rough estimate using 30 km/h average city speed.
+ * estimatedTimeSecs — total travel time along the path, from each edge's speed_kmh.
  */
 public record PathResponse(
     List<LatLng> path,

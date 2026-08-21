@@ -19,16 +19,14 @@ import java.util.List;
  * Full flow:
  *   1. Validate that the graph is loaded (503 if not)
  *   2. Snap start and end lat/lng to the nearest graph nodes (PostGIS KNN)
- *   3. Run Dijkstra on the in-memory adjacency map
+ *   3. Run Dijkstra on the in-memory adjacency map, minimising distance or time
+ *      per the request's `optimize` field
  *   4. Convert the resulting node-ID path into lat/lng coordinates
- *   5. Return the polyline + distance + estimated travel time
+ *   5. Return the polyline + distance + travel time along that path
  */
 @RestController
 @RequestMapping("/api")
 public class PathController {
-
-    // 30 km/h average city speed → 8.33 m/s
-    private static final double CITY_SPEED_MS = 30_000.0 / 3600.0;
 
     @Autowired private GraphService graphService;
     @Autowired private DijkstraService dijkstraService;
@@ -48,12 +46,15 @@ public class PathController {
         Node startNode = snapService.snapToNearest(req.start().lat(), req.start().lng());
         Node endNode   = snapService.snapToNearest(req.end().lat(),   req.end().lng());
 
+        DijkstraService.WeightType weightType = parseWeightType(req.optimize());
+
         // ── Run Dijkstra ──────────────────────────────────────────────────────
         DijkstraService.PathResult result =
             dijkstraService.findShortestPath(
                 graphService.getAdjacency(),
                 startNode.getId(),
-                endNode.getId()
+                endNode.getId(),
+                weightType
             ).orElseThrow(() -> new RouteNotFoundException(startNode.getId(), endNode.getId()));
 
         // ── Build response ────────────────────────────────────────────────────
@@ -65,8 +66,17 @@ public class PathController {
             })
             .toList();
 
-        long estimatedTimeSecs = Math.round(result.totalDistanceMeters() / CITY_SPEED_MS);
+        long estimatedTimeSecs = Math.round(result.totalTimeSeconds());
 
         return new PathResponse(polyline, result.totalDistanceMeters(), estimatedTimeSecs);
+    }
+
+    private DijkstraService.WeightType parseWeightType(String optimize) {
+        return switch (optimize.toLowerCase()) {
+            case "distance" -> DijkstraService.WeightType.DISTANCE;
+            case "time" -> DijkstraService.WeightType.TIME;
+            default -> throw new IllegalArgumentException(
+                "Invalid optimize value '" + optimize + "': must be 'distance' or 'time'");
+        };
     }
 }

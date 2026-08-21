@@ -30,10 +30,12 @@ public class GraphService {
     private static final Logger log = LoggerFactory.getLogger(GraphService.class);
 
     /**
-     * One entry in the adjacency list: the ID of a reachable neighbour and the
-     * cost (metres) to reach it.
+     * One entry in the adjacency list: the ID of a reachable neighbour, plus both
+     * weights DijkstraService can route on. timeSeconds is derived from
+     * distanceMeters / speedKmh here rather than stored, so retuning speed
+     * assumptions never requires a re-import.
      */
-    public record Neighbor(long toNodeId, double weight) {}
+    public record Neighbor(long toNodeId, double distanceMeters, double timeSeconds) {}
 
     @Autowired private NodeRepository nodeRepository;
     @Autowired private EdgeRepository edgeRepository;
@@ -63,8 +65,10 @@ public class GraphService {
         for (Node n : nodes) adj.put(n.getId(), new ArrayList<>());
 
         for (Edge e : edges) {
+            double speedMs = e.getSpeedKmh() * 1000.0 / 3600.0;
+            double timeSeconds = e.getDistanceMeters() / speedMs;
             adj.computeIfAbsent(e.getFromNodeId(), k -> new ArrayList<>())
-               .add(new Neighbor(e.getToNodeId(), e.getWeight()));
+               .add(new Neighbor(e.getToNodeId(), e.getDistanceMeters(), timeSeconds));
         }
 
         // Swap in the new graph atomically so reads during reload see a consistent view

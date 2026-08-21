@@ -97,7 +97,8 @@ public class GraphImporter implements CommandLineRunner {
             .map(pe -> Edge.builder()
                 .fromNodeId(osmIdToDbId.get(pe.fromOsmId()))
                 .toNodeId(osmIdToDbId.get(pe.toOsmId()))
-                .weight(pe.weight())
+                .distanceMeters(pe.distanceMeters())
+                .speedKmh(pe.speedKmh())
                 .osmWayId(pe.osmWayId())
                 .build())
             .toList();
