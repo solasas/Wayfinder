@@ -87,6 +87,7 @@ class SpringAiProviderIntegrationTest {
 
     private ApplicationContextRunner runner(String... extraProps) {
         List<String> props = new ArrayList<>(List.of(
+            "spring.config.import=", // do not pick up the developer's real .env: these tests must not depend on it
             "spring.ai.anthropic.base-url=http://127.0.0.1:" + server.getAddress().getPort(),
             "spring.ai.anthropic.api-key=test-key"));
         props.addAll(List.of(extraProps));
