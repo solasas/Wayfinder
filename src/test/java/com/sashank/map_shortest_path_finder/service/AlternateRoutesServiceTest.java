@@ -143,4 +143,54 @@ class AlternateRoutesServiceTest {
 
         assertTrue(routes.isEmpty());
     }
+
+    // ── scale: no graph copies, bounded work ─────────────────────────────────
+
+    /** n×n grid, 4-neighbour, unit-ish weights: lots of equal-cost alternatives, ~n² nodes. */
+    private static Map<Long, List<GraphService.Neighbor>> grid(int n) {
+        Map<Long, List<GraphService.Neighbor>> g = new java.util.HashMap<>();
+        for (int y = 0; y < n; y++) for (int x = 0; x < n; x++) {
+            List<GraphService.Neighbor> out = new java.util.ArrayList<>();
+            int[][] d = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+            for (int[] o : d) {
+                int nx = x + o[0], ny = y + o[1];
+                if (nx >= 0 && ny >= 0 && nx < n && ny < n) out.add(nb((long) ny * n + nx, 10 + ((x * 7 + y * 13) % 5)));
+            }
+            g.put((long) y * n + x, out);
+        }
+        return g;
+    }
+
+    @Test
+    void doesNotMutateOrReplaceTheGraph() {
+        var g = grid(12);
+        Map<Long, List<GraphService.Neighbor>> before = new java.util.HashMap<>();
+        g.forEach((k, v) -> before.put(k, List.copyOf(v)));
+        Map<Long, Integer> identities = new java.util.HashMap<>();
+        g.forEach((k, v) -> identities.put(k, System.identityHashCode(v)));
+
+        alternateRoutes.findKShortestPaths(g, 0, 143, 5, DijkstraService.WeightType.DISTANCE);
+
+        g.forEach((k, v) -> {
+            assertEquals(before.get(k), v, "edges of node " + k + " changed");
+            assertEquals(identities.get(k), System.identityHashCode(v), "list of node " + k + " was replaced");
+        });
+    }
+
+    @Test
+    void timeBudget_bounds_theWork_andStillReturnsTheShortestPathFirst() {
+        var g = grid(60);                                    // 3 600 nodes; unbounded k=20 would take far longer than the budget
+        var unlimited = alternateRoutes.findKShortestPaths(g, 0, 60 * 60 - 1, 1, DijkstraService.WeightType.DISTANCE);
+        var budgeted = new AlternateRoutesService(new DijkstraService(), 50);
+
+        long t0 = System.nanoTime();
+        var routes = budgeted.findKShortestPaths(g, 0, 60 * 60 - 1, 20, DijkstraService.WeightType.DISTANCE);
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+
+        assertFalse(routes.isEmpty());
+        assertTrue(routes.size() < 20, "budget should have cut the search short, got " + routes.size());
+        assertEquals(unlimited.get(0).nodeIds(), routes.get(0).nodeIds());
+        // one in-flight Dijkstra may finish after the deadline; allow generous slack
+        assertTrue(ms < 3_000, "took " + ms + " ms for a 50 ms budget");
+    }
 }

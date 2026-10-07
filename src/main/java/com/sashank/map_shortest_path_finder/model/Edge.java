@@ -42,4 +42,22 @@ public class Edge {
     /** OSM way ID this segment was derived from. Useful for debugging imports. */
     @Column(name = "osm_way_id")
     private Long osmWayId;
+
+    /**
+     * Raw OSM `highway` tag value, plus tri-state `toll`, `lit` and `paved` flags. All nullable:
+     * rows imported before these columns existed have no values until a --force-reimport,
+     * and null `toll`/`lit` also means "not tagged in OSM".
+     */
+    @Column(name = "highway")
+    private String highway;
+
+    @Column(name = "toll")
+    private Boolean toll;
+
+    @Column(name = "lit")
+    private Boolean lit;
+
+    /** True/false from the OSM `surface` tag (paved vs unpaved); null when untagged or unrecognised. */
+    @Column(name = "paved")
+    private Boolean paved;
 }

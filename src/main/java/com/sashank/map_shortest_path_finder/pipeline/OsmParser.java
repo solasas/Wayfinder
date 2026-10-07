@@ -15,7 +15,7 @@ import java.util.stream.Collectors;
  *   - Every OSM node referenced by a drivable way becomes a graph Node.
  *   - Every consecutive pair of nodes along a way becomes a directed Edge.
  *   - Bidirectional roads → two edges (A→B and B→A), same weight.
- *   - One-way roads (oneway=yes, or motorways) → one edge in the forward direction.
+ *   - One-way roads (oneway=yes/-1, motorways, roundabouts) → one edge in the direction of travel.
  *
  * Each edge carries two independent weights: distanceMeters (Haversine) and a
  * typical speedKmh looked up from the way's `highway` tag. GraphService derives
@@ -35,14 +35,19 @@ public class OsmParser {
     private static final Logger log = LoggerFactory.getLogger(OsmParser.class);
 
     /** Typical free-flow speed by OSM `highway` tag value. Unknown tags fall back to DEFAULT_SPEED_KMH. */
-    private static final Map<String, Double> HIGHWAY_SPEED_KMH = Map.of(
-        "motorway",    80.0,
-        "primary",     60.0,
-        "secondary",   50.0,
-        "residential", 30.0,
-        "service",     15.0
+    private static final Map<String, Double> HIGHWAY_SPEED_KMH = Map.ofEntries(
+        Map.entry("motorway",     80.0),
+        Map.entry("trunk",        70.0),   // national highways between cities: far from the 40 km/h default
+        Map.entry("primary",      60.0),
+        Map.entry("secondary",    50.0),
+        Map.entry("tertiary",     40.0),
+        Map.entry("residential",  30.0),
+        Map.entry("living_street", 15.0),
+        Map.entry("service",      15.0)
     );
     private static final double DEFAULT_SPEED_KMH = 40.0;
+    /** Slip roads and ramps (*_link) are slower than the road they belong to. */
+    private static final double LINK_SPEED_CAP_KMH = 40.0;
 
     /**
      * The output of parsing: Node entities ready to be saved, plus edge descriptors
@@ -54,9 +59,18 @@ public class OsmParser {
      * An edge described in terms of OSM IDs, before the DB assigns primary keys.
      * GraphImporter translates these into Edge entities once nodes are saved.
      */
-    public record ParsedEdge(long fromOsmId, long toOsmId, double distanceMeters, double speedKmh, long osmWayId) {}
+    public record ParsedEdge(long fromOsmId, long toOsmId, double distanceMeters, double speedKmh, long osmWayId,
+                             String highway, Boolean toll, Boolean lit, Boolean paved) {}
 
     public ParsedGraph parse(OsmResponse response) {
+        return parse(response, Set.of());
+    }
+
+    /**
+     * @param skipWayIds ways that have already been imported (e.g. returned by a neighbouring tile): ignored, so
+     *                   a way is never turned into edges twice.
+     */
+    public ParsedGraph parse(OsmResponse response, Set<Long> skipWayIds) {
         // ── Step 1: split the flat element list into nodes and ways ──────────
         Map<Long, double[]> nodeCoords = new LinkedHashMap<>(); // osmId → [lat, lon]
         List<OsmResponse.OsmElement> ways = new ArrayList<>();
@@ -66,7 +80,8 @@ public class OsmParser {
                 nodeCoords.put(elem.getId(), new double[]{elem.getLat(), elem.getLon()});
             } else if ("way".equals(elem.getType())
                     && elem.getNodes() != null
-                    && elem.getNodes().size() >= 2) {
+                    && elem.getNodes().size() >= 2
+                    && !skipWayIds.contains(elem.getId())) {
                 ways.add(elem);
             }
         }
@@ -92,8 +107,12 @@ public class OsmParser {
         // ── Step 3: build edges from consecutive node pairs in each way ──────
         List<ParsedEdge> edges = new ArrayList<>();
         for (OsmResponse.OsmElement way : ways) {
-            boolean oneway = isOneway(way.getTags());
+            Direction direction = directionOf(way.getTags());
             double speedKmh = speedKmhFor(way.getTags());
+            String highway = way.getTags() == null ? null : way.getTags().get("highway");
+            Boolean toll = yesNoTag(way.getTags(), "toll");
+            Boolean lit = yesNoTag(way.getTags(), "lit");
+            Boolean paved = pavedFromSurface(way.getTags());
             List<Long> refs = way.getNodes();
 
             for (int i = 0; i < refs.size() - 1; i++) {
@@ -104,9 +123,11 @@ public class OsmParser {
                 double dist = haversine(from.getLat(), from.getLng(),
                                         to.getLat(),   to.getLng());
 
-                edges.add(new ParsedEdge(from.getOsmId(), to.getOsmId(), dist, speedKmh, way.getId()));
-                if (!oneway) {
-                    edges.add(new ParsedEdge(to.getOsmId(), from.getOsmId(), dist, speedKmh, way.getId()));
+                if (direction != Direction.REVERSE) {
+                    edges.add(new ParsedEdge(from.getOsmId(), to.getOsmId(), dist, speedKmh, way.getId(), highway, toll, lit, paved));
+                }
+                if (direction != Direction.FORWARD) {
+                    edges.add(new ParsedEdge(to.getOsmId(), from.getOsmId(), dist, speedKmh, way.getId(), highway, toll, lit, paved));
                 }
             }
         }
@@ -116,16 +137,58 @@ public class OsmParser {
         return new ParsedGraph(new ArrayList<>(osmIdToNode.values()), edges);
     }
 
+    private enum Direction { BOTH, FORWARD, REVERSE }
+
     /**
-     * Returns true if traffic may only flow in the way's node order (forward direction).
-     * Motorways are implicitly one-way in OSM even without an explicit tag.
+     * Which way traffic may flow relative to the way's node order.
+     *   oneway=yes/1/true → FORWARD;  oneway=-1/reverse → REVERSE;  oneway=no → BOTH (explicit tag wins);
+     *   otherwise implied: motorways and roundabouts are one-way (forward) even without a tag.
      */
-    private boolean isOneway(Map<String, String> tags) {
-        if (tags == null) return false;
-        String val     = tags.get("oneway");
+    private Direction directionOf(Map<String, String> tags) {
+        if (tags == null) return Direction.BOTH;
+        String oneway = tags.get("oneway");
+        if ("-1".equals(oneway) || "reverse".equals(oneway)) return Direction.REVERSE;
+        if ("yes".equals(oneway) || "1".equals(oneway) || "true".equals(oneway)) return Direction.FORWARD;
+        if ("no".equals(oneway) || "false".equals(oneway) || "0".equals(oneway)) return Direction.BOTH;
         String highway = tags.get("highway");
-        return "yes".equals(val) || "1".equals(val) || "true".equals(val)
-            || "motorway".equals(highway) || "motorway_link".equals(highway);
+        String junction = tags.get("junction");
+        if ("motorway".equals(highway) || "motorway_link".equals(highway)
+                || "roundabout".equals(junction) || "circular".equals(junction)) {
+            return Direction.FORWARD;
+        }
+        return Direction.BOTH;
+    }
+
+    /**
+     * Reads a yes/no OSM tag as a tri-state: TRUE for yes/true/1, FALSE for no/false/0,
+     * null when absent or any other value (e.g. lit=automatic, toll=maybe) — unknown,
+     * rather than guessed.
+     */
+    private Boolean yesNoTag(Map<String, String> tags, String key) {
+        if (tags == null) return null;
+        String val = tags.get(key);
+        if (val == null) return null;
+        return switch (val) {
+            case "yes", "true", "1" -> Boolean.TRUE;
+            case "no", "false", "0" -> Boolean.FALSE;
+            default -> null;
+        };
+    }
+
+    private static final Set<String> PAVED_SURFACES = Set.of(
+        "paved", "asphalt", "concrete", "concrete:plates", "concrete:lanes", "paving_stones", "sett",
+        "cobblestone", "bricks", "metal", "wood");
+    private static final Set<String> UNPAVED_SURFACES = Set.of(
+        "unpaved", "gravel", "fine_gravel", "dirt", "ground", "earth", "sand", "grass", "mud",
+        "compacted", "pebblestone", "rock", "clay");
+
+    /** OSM `surface` as paved (TRUE) / unpaved (FALSE); null if untagged or an unrecognised value. */
+    private Boolean pavedFromSurface(Map<String, String> tags) {
+        if (tags == null || tags.get("surface") == null) return null;
+        String surface = tags.get("surface");
+        if (PAVED_SURFACES.contains(surface)) return Boolean.TRUE;
+        if (UNPAVED_SURFACES.contains(surface)) return Boolean.FALSE;
+        return null;
     }
 
     /**
@@ -134,7 +197,12 @@ public class OsmParser {
      */
     private double speedKmhFor(Map<String, String> tags) {
         if (tags == null) return DEFAULT_SPEED_KMH;
-        return HIGHWAY_SPEED_KMH.getOrDefault(tags.get("highway"), DEFAULT_SPEED_KMH);
+        String highway = tags.get("highway");
+        if (highway != null && highway.endsWith("_link")) {
+            String base = highway.substring(0, highway.length() - "_link".length());
+            return Math.min(HIGHWAY_SPEED_KMH.getOrDefault(base, DEFAULT_SPEED_KMH), LINK_SPEED_CAP_KMH);
+        }
+        return HIGHWAY_SPEED_KMH.getOrDefault(highway, DEFAULT_SPEED_KMH);
     }
 
     /**

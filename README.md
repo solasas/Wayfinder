@@ -196,6 +196,8 @@ SnapService
 | `/api/region` | GET | Returns the supported area name, center point, and bounding box. Frontend uses this to initialize the map. |
 | `/api/shortest-path` | POST | Best route between two points — or, with `?alternates=true`, a list of distinct alternates. |
 | `/api/isochrone` | GET | Every point reachable from a location within a travel-time (or distance) budget. |
+| `/api/routes/intent` | POST | Coordinates + a free-text instruction ("fastest route without tolls"): routes between the two points under the structured constraints/preferences extracted from the text. |
+| `/api/intent-route` | POST | Natural-language routing where the *destination is named in the text* ("fastest way to the railway station…"); needs the geocoder. |
 
 #### `POST /api/shortest-path`
 
@@ -249,6 +251,102 @@ GET /api/isochrone?lat=16.985&lng=81.79&minutes=5&optimize=time
 }
 ```
 `center` is the graph node the query snapped to, not necessarily the exact requested point. Each `reachableNodes[i].distance` is the cumulative cost to reach that node in the units of `optimize` — seconds for `"time"`, metres for `"distance"`.
+
+#### `POST /api/routes/intent`
+
+Start and end are **coordinates**, so no geocoding is involved (and no place name is ever assumed to resolve); the instruction only says *how* to travel. Both points go through the existing `SnapService` / `RegionConfig` — outside Rajahmundry → 400, checked *before* the LLM is called — and are snapped to the nearest graph node.
+
+```json
+POST /api/routes/intent
+{ "start": { "lat": 16.975, "lng": 81.778 },
+  "end":   { "lat": 16.990, "lng": 81.800 },
+  "instruction": "Find the fastest route without tolls" }
+```
+Optional fields:
+- `"unknownDataPolicy": "STRICT" | "ALLOW_UNKNOWN"` — see below; default `STRICT`.
+- `"objective": "FASTEST" | "SHORTEST" | "AUTO"` — an explicit choice (e.g. from a UI selector) **overrides** what the instruction implies; omitted or `AUTO` lets the instruction decide (default fastest). `ECO_FRIENDLY` → 400.
+
+The response (field names for `path`, `distanceMeters`, `estimatedTimeSecs` match `/api/shortest-path`; every value comes from the graph engine, so only the *shape* is shown):
+
+```
+{ "path": [ {lat,lng}, ... ],                // ordered route coordinates
+  "distanceMeters": …, "estimatedTimeSecs": …,   // true totals of the chosen road segments
+  "objective": "FASTEST" | "SHORTEST",
+  "constraints": { "avoidTolls", "avoidHighways", "avoidUnpaved" },        // HARD rules; the route satisfies all of them
+  "preferences": { "preferWellLit", "minimizeTurns" },                      // SOFT wishes requested
+  "preferencesApplied": { … },                                              // which of those actually shaped the route
+  "unknownDataPolicy": "STRICT",
+  "snappedStart": {lat,lng}, "snappedEnd": {lat,lng},                       // where the path really begins/ends
+  "explanation": "Fastest route: 2.3 km, about 4 min. Every segment is tagged non-toll …",
+  "dataLimitations": [ "Toll status is tagged on under 1% of road segments in the map data.", … ],
+  "notices": [ "Not supported, so ignored: avoid traffic", … ],
+  "details": { tollUnverifiedMeters, surfaceUnverifiedMeters, highwayClassUnknownMeters, litMeters, unlitMeters, unknownLitMeters, turns },
+  "plainRoute": { distanceMeters, timeSeconds, turns } | null }           // same constraints, no soft preferences
+```
+- **`dataLimitations`** = what the map data can't establish: how sparse the toll / surface / lighting tags are across the imported graph (shown below 95% coverage), unverified portions of the route, and — under `STRICT` — that a shorter compliant route through untagged segments may exist. **`notices`** = everything else: unsupported requests that were ignored, a place name in the instruction that was ignored in favour of your coordinates, a soft preference dropped because it would have cost more than the allowed margin, start and end snapping to the same point.
+- A constraint failure is a 404 whose body also carries `"code": "CONSTRAINTS_NOT_SATISFIABLE"` and `"retryWithAllowUnknown": true|false` (true = the constraints were merely *unverifiable* under `STRICT`, so resending with `ALLOW_UNKNOWN` can work), so a client never has to parse the message.
+- `preferencesApplied.preferWellLit` is true only when the route actually contains lighting-tagged segments; a requested preference that had nothing to act on is reported as not applied.
+- Errors reuse the project's conventions: bad/missing fields or out-of-region points → 400; no route (or none that satisfies the constraints / can be verified) → 404; ambiguous or contradictory instruction → 422 with a `question`; LLM rate limit → 429, timeout → 504, not configured/unavailable → 503.
+
+#### `POST /api/intent-route`
+
+Describe the trip in plain English. An LLM (via **Spring AI**, provider selectable by configuration) turns the text into a fixed structure; the destination name is geocoded with Nominatim **restricted to the region's bounding box**; the existing Dijkstra engine computes the route. The model never produces coordinates, code, SQL or graph operations — it has no tools and the only thing it can fill in is the schema below.
+
+**LLM configuration** (environment variables; the app starts fine without them and this endpoint answers 503):
+
+| Variable | Meaning |
+|---|---|
+| `INTENT_LLM_PROVIDER` | `anthropic` (default), `openai`, or `none` |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | credentials for the chosen provider |
+| `INTENT_LLM_MODEL` | model name override (defaults: `claude-haiku-4-5-20251001` / `gpt-4o-mini`) |
+
+Setting `INTENT_LLM_PROVIDER=openai` without `OPENAI_API_KEY` fails at startup (Spring AI validates it). With the Anthropic provider and no key, the endpoint reports "not configured" **without sending anything** to the provider.
+
+**How the parsing service is kept safe** (`SpringAiIntentParser`, independent of routing so it is tested with canned model replies):
+- *Strict structured output:* the JSON schema is generated from `IntentDraft` and sent with the prompt; the reply is parsed by a strict mapper — unknown fields, wrong types (`"yes"` for a boolean, `42` for a name) and invalid enum values are rejected. An omitted flag means `false`.
+- *Untrusted input:* the user's text is passed as a template **parameter** inside `<user_request>` delimiters (so `{braces}` or a fake closing tag can't alter the prompt), and the system prompt tells the model to treat it as data.
+- *Server-side validation of everything:* `RouteIntent`'s constructor enforces the invariants; place names are restricted to letters/digits/basic punctuation, so SQL/markup/shell-looking strings are rejected before they reach the geocoder.
+- *Ambiguity and contradictions:* the model reports `status: CLARIFY` for a vague destination ("the station") or contradictory instructions ("fastest and shortest"); the API answers **422** with `{"clarificationNeeded": true, "question": "..."}`. A request that isn't about travel is a 400 with a fixed message (the model's text is never echoed). Not caught: a *specific* name that matches several places — the geocoder takes the top hit inside the region.
+- *Privacy:* coordinates, links, e-mail addresses and phone numbers are stripped from the text before it leaves the server, and the structured `start` coordinates are never sent. Place names necessarily are. Raw queries are not logged.
+- *Provider failures* are classified without leaking provider detail: rate limit → **429**, timeout → **504**, bad/missing credentials or other errors → **503**. Waiting is bounded (`spring.ai.*.timeout=15s`, 1 SDK retry, Spring AI retry capped at 2 attempts — its default is 10 attempts with exponential backoff).
+
+After upgrading, run the import with `--force-reimport` so edges get their road-class / toll / lit / surface attributes; before that, only the objective and destination are honoured and the hard constraints can't be verified. `avoidUnpaved` relies on OSM `surface` tags, which are sparse, and the import filter excludes `track` roads.
+
+The model's output must become this validated structure (`RouteIntent`); anything else is rejected with 400:
+
+```json
+{ "destination": "railway station", "objective": "FASTEST",
+  "constraints": { "avoidTolls": true, "avoidHighways": true, "avoidUnpaved": false },
+  "preferences": { "preferWellLit": true, "minimizeTurns": false } }
+```
+
+- **`objective`** — `FASTEST` (minimise travel time) or `SHORTEST` (minimise distance); these map directly onto the existing `WeightType`. `ECO_FRIENDLY` is reserved but rejected: it needs a documented emissions model and per-segment data (vehicle, gradient) that don't exist here.
+- **Hard `constraints`** (`avoidTolls`, `avoidHighways`, `avoidUnpaved`) — matching edges are removed from the graph before any search, and constraints are **never relaxed**: a returned route always satisfies them, otherwise you get a 404 saying why. Which edges qualify depends on the request's **`unknownDataPolicy`** (below).
+- **Highway policy** — `avoidHighways` excludes the road classes in `intent.routing.highway-classes` (default `MOTORWAY, TRUNK`, including `_link` ramps). `PRIMARY` is *not* excluded by default even though some Indian national highways are tagged primary in OSM; add it to the list if that's what you mean.
+- **Soft `preferences`** — reweight edges, never forbid them:
+  - `preferWellLit`: each edge's cost is multiplied by a unitless factor (lit ×1.0, untagged ×1.25, unlit ×1.5 — configurable), so costs stay in the objective's units.
+  - `minimizeTurns`: a turn depends on the previous edge, so the search runs over an **edge-expanded graph** (one state per directed edge; each transition is priced by the turn angle). A bend of ≥30° costs 6 s (FASTEST) or the equivalent 67 m at 40 km/h (SHORTEST). Same `DijkstraService`, different graph. Costs ~0.7 s for a corner-to-corner route on a 22k-node graph (plain routing ~25 ms), so it is only used when requested.
+  - **Bounded:** a preference route is accepted only if its real cost is within `intent.routing.max-detour-factor` (default 1.3) of the plain route under the same constraints; otherwise the plain route is returned and flagged. The response's `plainRoute` shows the comparison.
+- No safety claims are made. Lighting is reported only as what OSM tags say ("X% tagged lit, Y% unlit, Z% untagged").
+- Unknown fields at any level, wrong types, and oversized names are rejected, so a misspelt `avoidToll` can't silently drop a constraint. Requests no field covers (e.g. "avoid traffic") go to `warnings`.
+- To add a constraint/preference: add a component to `Constraints`/`Preferences`, then the validator, `PreferenceRoutingService` and `RouteExplainer` (a test fails if the validator is missed).
+
+**Missing road data — `unknownDataPolicy`** (request field, set by the user; the language model never sets it):
+
+| Policy | An edge is usable if… | Result |
+|---|---|---|
+| `STRICT` (default) | its tags *positively* show it complies (`toll=no`, a paved `surface`, a known road class outside the highway policy) | Any returned route provably satisfies every hard constraint. But OSM `toll`/`surface` tags are sparse, so there may be none → 404 `CONSTRAINTS_UNVERIFIABLE`-style message telling you to resend with `ALLOW_UNKNOWN`. |
+| `ALLOW_UNKNOWN` | it is not *known* to violate | Route found if one exists; `details` and `warnings` report how many metres have unknown toll/surface/class, i.e. where compliance is unverified. Known violations are still excluded. |
+
+Failure modes (all 404, distinct messages): no road connection at all · constraints can't be verified under `STRICT` (but could be with `ALLOW_UNKNOWN`) · no route satisfies the constraints even when unknown is accepted.
+
+**Schema migration:** new nullable `edges` columns (`highway`, `toll`, `lit`, `paved`) are added automatically at app start by `ddl-auto=update`; `docker/postgres/migrations/001_edge_road_attributes.sql` is an idempotent script for running with `ddl-auto=validate`. Existing rows stay `NULL` (unknown) until `--force-reimport`; startup logs the attribute coverage and warns if it is zero.
+
+Route totals (`distanceMeters`, `estimatedTimeSecs`) are always the real figures, not the penalised costs.
+
+The response contains `intent` (what was understood), `origin`, `destination`, `route` (same shape as `/api/shortest-path`), `explanation` and `warnings`. The explanation is generated from the route's measured segments, not by the model, so it can't claim something the route doesn't do. OSM `lit` and `toll` tags are sparse; when coverage is low the response says so instead of implying a guarantee.
+
+Extra error cases: unknown/out-of-region destination → 404; unintelligible request or missing start → 400; ambiguous/contradictory request → 422; LLM rate limit → 429; LLM timeout → 504; missing API key, LLM or geocoder outage → 503.
 
 **Error responses** (all three endpoints, where applicable):
 

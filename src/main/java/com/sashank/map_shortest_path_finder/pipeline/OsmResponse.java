@@ -26,6 +26,12 @@ public class OsmResponse {
 
     private List<OsmElement> elements;
 
+    /**
+     * Overpass reports a query that timed out or ran out of memory as HTTP 200 with the (partial) data plus a remark
+     * like "runtime error: Query timed out ...". OsmDataFetcher refuses such responses.
+     */
+    private String remark;
+
     @Data
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class OsmElement {

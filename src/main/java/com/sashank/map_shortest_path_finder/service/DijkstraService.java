@@ -67,6 +67,33 @@ public class DijkstraService {
     }
 
     /**
+     * Per-search rules applied WHILE traversing, so callers never have to copy the (potentially
+     * million-node) adjacency map just to forbid or re-weight a few edges. The shared graph is
+     * never mutated.
+     *
+     * allowed — false hides the edge from this search entirely.
+     * factor  — unitless multiplier on the edge's cost in the units being minimised (must be &gt; 0);
+     *           it only steers the search: reported distance/time totals stay the real ones.
+     */
+    public interface EdgePolicy {
+        /** Every edge allowed at its true cost: the behaviour of the policy-less overloads. */
+        EdgePolicy ALL = (from, edge) -> true;
+
+        boolean allowed(long fromId, GraphService.Neighbor edge);
+
+        default double factor(GraphService.Neighbor edge) { return 1.0; }
+
+        /** This policy plus a cost factor. */
+        default EdgePolicy withFactor(java.util.function.ToDoubleFunction<GraphService.Neighbor> f) {
+            EdgePolicy base = this;
+            return new EdgePolicy() {
+                public boolean allowed(long fromId, GraphService.Neighbor edge) { return base.allowed(fromId, edge); }
+                public double factor(GraphService.Neighbor edge) { return base.factor(edge) * f.applyAsDouble(edge); }
+            };
+        }
+    }
+
+    /**
      * Finds the shortest path from source to target in the given adjacency map.
      *
      * @param adjacency  the graph (nodeId → list of outgoing neighbours)
@@ -80,6 +107,19 @@ public class DijkstraService {
             long sourceId,
             long targetId,
             WeightType weightType) {
+        return findShortestPath(adjacency, sourceId, targetId, weightType, EdgePolicy.ALL);
+    }
+
+    /**
+     * Same search, with edges filtered/re-weighted on the fly by {@code policy}. The returned totals
+     * are the true distance/time of the chosen edges even when {@code policy.factor} steered the search.
+     */
+    public Optional<PathResult> findShortestPath(
+            Map<Long, List<GraphService.Neighbor>> adjacency,
+            long sourceId,
+            long targetId,
+            WeightType weightType,
+            EdgePolicy policy) {
 
         if (!adjacency.containsKey(sourceId) || !adjacency.containsKey(targetId)) {
             return Optional.empty();
@@ -120,7 +160,8 @@ public class DijkstraService {
             if (cur.nodeId() == targetId) break; // target settled — stop early
 
             for (GraphService.Neighbor nb : adjacency.getOrDefault(cur.nodeId(), List.of())) {
-                double newDist = cur.d() + weightType.costOf(nb);
+                if (!policy.allowed(cur.nodeId(), nb)) continue;
+                double newDist = cur.d() + weightType.costOf(nb) * policy.factor(nb);
                 if (newDist < dist.getOrDefault(nb.toNodeId(), Double.MAX_VALUE)) {
                     dist.put(nb.toNodeId(), newDist);
                     prev.put(nb.toNodeId(), cur.nodeId());
@@ -222,7 +263,7 @@ public class DijkstraService {
             long from = entry.getKey();
             for (GraphService.Neighbor nb : entry.getValue()) {
                 reverse.computeIfAbsent(nb.toNodeId(), k -> new ArrayList<>())
-                       .add(new GraphService.Neighbor(from, nb.distanceMeters(), nb.timeSeconds()));
+                       .add(new GraphService.Neighbor(from, nb.distanceMeters(), nb.timeSeconds(), nb.attrs()));
             }
         }
         return reverse;

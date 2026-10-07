@@ -45,8 +45,23 @@ CREATE TABLE IF NOT EXISTS edges (
     to_node_id      BIGINT NOT NULL REFERENCES nodes(id),
     distance_meters DOUBLE PRECISION NOT NULL,
     speed_kmh       DOUBLE PRECISION NOT NULL,
-    osm_way_id      BIGINT           -- original OSM way ID; useful for debugging imports
+    osm_way_id      BIGINT,          -- original OSM way ID; useful for debugging imports
+    -- Road attributes for intent-based routing. Nullable: NULL toll/lit/paved = not tagged in OSM.
+    highway         VARCHAR(32),
+    toll            BOOLEAN,
+    lit             BOOLEAN,
+    paved           BOOLEAN          -- from OSM surface tag; NULL = unknown
 );
 
 -- Dijkstra always queries "give me all edges leaving node X", so index from_node_id.
 CREATE INDEX IF NOT EXISTS edges_from_node_idx ON edges (from_node_id);
+
+-- ─── IMPORT PROGRESS ──────────────────────────────────────────────────────────
+-- One row per Overpass tile fully imported. Lets the (long) multi-city import resume where it stopped.
+-- The importer also creates this table if it is missing, so existing databases need no manual step.
+CREATE TABLE IF NOT EXISTS import_tiles (
+    tile_key     TEXT PRIMARY KEY,
+    completed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    nodes_added  INTEGER NOT NULL DEFAULT 0,
+    edges_added  INTEGER NOT NULL DEFAULT 0
+);

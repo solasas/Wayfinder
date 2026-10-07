@@ -1,5 +1,9 @@
 package com.sashank.map_shortest_path_finder.service;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -38,10 +42,27 @@ import java.util.*;
 @Service
 public class AlternateRoutesService {
 
-    private final DijkstraService dijkstraService;
+    private static final Logger log = LoggerFactory.getLogger(AlternateRoutesService.class);
 
+    private final DijkstraService dijkstraService;
+    /** Wall-clock cap for one findKShortestPaths call; 0 = unlimited. */
+    private final long budgetMillis;
+
+    /** Unlimited budget — for tests and callers that bound the problem size themselves. */
     public AlternateRoutesService(DijkstraService dijkstraService) {
+        this(dijkstraService, 0);
+    }
+
+    /**
+     * @param budgetMillis Yen's runs one Dijkstra per node of the previous path, per alternate: fine for a city,
+     *        minutes for a 300 km trip. Once the budget is spent the search stops and returns what it has
+     *        (always at least the shortest path), which the contract allows ("fewer than k if ...").
+     */
+    @Autowired
+    public AlternateRoutesService(DijkstraService dijkstraService,
+                                  @Value("${routing.alternates.budget-millis:5000}") long budgetMillis) {
         this.dijkstraService = dijkstraService;
+        this.budgetMillis = budgetMillis;
     }
 
     /** One accepted route: its node sequence and total cost in both units. */
@@ -50,7 +71,7 @@ public class AlternateRoutesService {
     /**
      * Finds up to {@code k} distinct source→target paths, cheapest first.
      *
-     * @param adjacency  the graph (nodeId → list of outgoing neighbours) — never mutated
+     * @param adjacency  the graph (nodeId → list of outgoing neighbours) — never mutated or copied
      * @param sourceId   start node DB id
      * @param targetId   end node DB id
      * @param k          how many alternates to look for (k=1 just returns the shortest path)
@@ -86,37 +107,41 @@ public class AlternateRoutesService {
         PriorityQueue<DijkstraService.PathResult> candidates =
             new PriorityQueue<>(Comparator.comparingDouble(p -> costOf(p, weightType)));
 
-        while (accepted.size() < k) {
+        final long deadline = budgetMillis > 0 ? System.nanoTime() + budgetMillis * 1_000_000L : Long.MAX_VALUE;
+        boolean outOfTime = false;
+
+        while (accepted.size() < k && !outOfTime) {
             List<Long> previousPath = accepted.get(accepted.size() - 1).nodeIds();
 
             for (int i = 0; i < previousPath.size() - 1; i++) {
+                if (System.nanoTime() > deadline) {
+                    outOfTime = true;
+                    log.info("Alternate-routes budget of {} ms spent; returning {} route(s) instead of up to {}.",
+                        budgetMillis, accepted.size(), k);
+                    break;
+                }
                 long spurNode = previousPath.get(i);
                 List<Long> rootPath = previousPath.subList(0, i + 1); // source..spurNode inclusive
 
-                Map<Long, List<GraphService.Neighbor>> pruned = copyAdjacency(adjacency);
-
-                // Remove the edge any already-accepted path takes out of spurNode,
-                // if that path shares this exact root — otherwise Dijkstra would
-                // just rediscover a path we already have.
+                // Instead of copying the graph and deleting edges/nodes from the copy (O(V+E) per spur node — ruinous
+                // on a million-node graph), hide them from this one search through a traversal-time policy:
+                //  - the edge any already-accepted path takes out of spurNode, if that path shares this exact root
+                //    (otherwise Dijkstra would just rediscover a path we already have);
+                //  - every other root-path node, so the spur can't loop back through the root.
+                Set<Long> blockedNext = new HashSet<>();
                 for (DijkstraService.PathResult acceptedPath : accepted) {
                     List<Long> nodeIds = acceptedPath.nodeIds();
                     if (nodeIds.size() > i + 1 && nodeIds.subList(0, i + 1).equals(rootPath)) {
-                        long nextNode = nodeIds.get(i + 1);
-                        List<GraphService.Neighbor> spurNeighbors = pruned.get(spurNode);
-                        if (spurNeighbors != null) {
-                            spurNeighbors.removeIf(n -> n.toNodeId() == nextNode);
-                        }
+                        blockedNext.add(nodeIds.get(i + 1));
                     }
                 }
-
-                // Remove every other root-path node so the spur search can't loop
-                // back through the root and produce a path with a repeated node.
-                for (int j = 0; j < i; j++) {
-                    pruned.remove(rootPath.get(j));
-                }
+                Set<Long> blockedNodes = new HashSet<>(rootPath.subList(0, i));
+                final long spurId = spurNode;
+                DijkstraService.EdgePolicy policy = (from, edge) ->
+                    !blockedNodes.contains(edge.toNodeId()) && !(from == spurId && blockedNext.contains(edge.toNodeId()));
 
                 Optional<DijkstraService.PathResult> spurResult =
-                    dijkstraService.findShortestPath(pruned, spurNode, targetId, weightType);
+                    dijkstraService.findShortestPath(adjacency, spurNode, targetId, weightType, policy);
                 if (spurResult.isEmpty()) {
                     continue;
                 }
@@ -152,16 +177,6 @@ public class AlternateRoutesService {
         return weightType == DijkstraService.WeightType.DISTANCE
             ? path.totalDistanceMeters()
             : path.totalTimeSeconds();
-    }
-
-    private static Map<Long, List<GraphService.Neighbor>> copyAdjacency(
-            Map<Long, List<GraphService.Neighbor>> adjacency) {
-
-        Map<Long, List<GraphService.Neighbor>> copy = new HashMap<>();
-        for (Map.Entry<Long, List<GraphService.Neighbor>> e : adjacency.entrySet()) {
-            copy.put(e.getKey(), new ArrayList<>(e.getValue()));
-        }
-        return copy;
     }
 
     /** Sums the distance/time of each edge along rootPath, read from the ORIGINAL (unpruned) adjacency. */
