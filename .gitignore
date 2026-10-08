@@ -36,3 +36,7 @@ build/
 .env
 .env.local
 !.env.example
+
+# Local OpenStreetMap extracts for region.importer.source=pbf (large)
+/data/
+*.osm.pbf

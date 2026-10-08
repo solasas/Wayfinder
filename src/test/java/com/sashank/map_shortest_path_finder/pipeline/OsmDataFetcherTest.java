@@ -90,6 +90,28 @@ class OsmDataFetcherTest {
     }
 
     @Test
+    void aFailedAttemptMovesOnToTheNextEndpoint_andWrapsAroundAfterTheLast() {
+        String mirror = "https://mirror.test/api/interpreter";
+        RestTemplate rt = new RestTemplate();
+        MockRestServiceServer s = MockRestServiceServer.bindTo(rt).ignoreExpectOrder(false).build();
+        var f = new OsmDataFetcher(rt, List.of(URL, mirror), settings, sleeps::add);
+        settings.setMaxAttempts(3);
+
+        s.expect(requestTo(URL)).andRespond(withStatus(org.springframework.http.HttpStatus.GATEWAY_TIMEOUT));
+        s.expect(requestTo(mirror)).andRespond(withStatus(org.springframework.http.HttpStatus.GATEWAY_TIMEOUT));
+        s.expect(requestTo(URL)).andRespond(withSuccess(OK_BODY, MediaType.APPLICATION_JSON));
+
+        assertNotNull(f.fetchRoadNetwork(box(), "^a$"));
+        s.verify();
+    }
+
+    @Test
+    void anEmptyEndpointList_isRejectedUpFront() {
+        assertThrows(IllegalStateException.class,
+            () -> new OsmDataFetcher(new RestTemplate(), List.<String>of(), settings, sleeps::add));
+    }
+
+    @Test
     void givesUpAfterTheConfiguredAttempts_withAMessageSayingHowToResume() {
         server.expect(times(3), requestTo(URL)).andRespond(withStatus(org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE));
 

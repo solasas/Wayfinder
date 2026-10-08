@@ -25,7 +25,7 @@ class GraphImporterIntegrationTest {
 
     private JdbcTemplate jdbc;
     private TileImporter tileImporter;
-    private OsmDataFetcher fetcher;
+    private RoadNetworkSource fetcher;
     private RegionConfig config;
     private GraphImporter importer;
     private final List<String> fetchedTiles = new ArrayList<>();
@@ -67,7 +67,7 @@ class GraphImporterIntegrationTest {
         config.getAreas().add(area);
         config.getImporter().setRequestDelayMillis(0);
 
-        fetcher = mock(OsmDataFetcher.class);
+        fetcher = mock(RoadNetworkSource.class);
         when(fetcher.fetchRoadNetwork(any(), anyString())).thenAnswer(inv -> {
             RegionConfig.Bbox b = inv.getArgument(0);
             fetchedTiles.add(b.toOverpassFormat());
@@ -80,7 +80,7 @@ class GraphImporterIntegrationTest {
         GraphImporter g = new GraphImporter();
         ReflectionTestUtils.setField(g, "regionConfig", config);
         ReflectionTestUtils.setField(g, "tilePlanner", new TilePlanner());
-        ReflectionTestUtils.setField(g, "osmDataFetcher", fetcher);
+        ReflectionTestUtils.setField(g, "roadNetworkSource", fetcher);
         ReflectionTestUtils.setField(g, "osmParser", new OsmParser());
         ReflectionTestUtils.setField(g, "tileImporter", tileImporter);
         ReflectionTestUtils.setField(g, "jdbc", jdbc);

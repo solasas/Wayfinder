@@ -59,7 +59,7 @@ public class SpringAiIntentParser implements IntentParser {
     private static final int MAX_QUESTION_LENGTH = 200;
 
     private static final String SYSTEM_PROMPT = """
-        You are a parser inside a route planner for Rajahmundry, India. You do not plan routes, \
+        You are a parser inside a route planner for cities in Andhra Pradesh, India. You do not plan routes, \
         answer questions, write code or run anything. Your only output is ONE JSON object that \
         follows the schema given below, with no other text.
 

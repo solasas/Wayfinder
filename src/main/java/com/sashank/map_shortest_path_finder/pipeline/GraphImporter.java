@@ -27,7 +27,7 @@ import java.util.Set;
  * command again continues with the tiles that are left. --force-reimport wipes everything and starts over.
  * If the region configuration changes (new area, different filter), only the new tiles are fetched.
  *
- * Steps per tile: fetch (Overpass) → parse (skipping ways already stored) → store (one transaction) → pause.
+ * Steps per tile: fetch (Overpass or local PBF) → parse (skipping ways already stored) → store (one transaction) → pause.
  */
 @Component
 @Profile("import")
@@ -37,7 +37,7 @@ public class GraphImporter implements CommandLineRunner {
 
     @Autowired private RegionConfig regionConfig;
     @Autowired private TilePlanner tilePlanner;
-    @Autowired private OsmDataFetcher osmDataFetcher;
+    @Autowired private RoadNetworkSource roadNetworkSource;
     @Autowired private OsmParser osmParser;
     @Autowired private TileImporter tileImporter;
     @Autowired private JdbcTemplate jdbc;
@@ -72,15 +72,16 @@ public class GraphImporter implements CommandLineRunner {
         if (existingNodes > 0) {
             tileImporter.loadStateFromDatabase();
         }
-        log.info("Importing '{}': {} tile(s) to fetch ({} already done). Each is one Overpass request; this can take a while.",
-                 regionConfig.getName(), pending.size(), tiles.size() - pending.size());
+        log.info("Importing '{}': {} tile(s) to fetch ({} already done). Each is one read from the configured OSM source ({}); this can take a while.",
+                 regionConfig.getName(), pending.size(), tiles.size() - pending.size(),
+                 regionConfig.getImporter().getSource());
 
         long started = System.nanoTime();
         int index = 0;
         for (TilePlanner.Tile tile : pending) {
             index++;
             log.info("[{}/{}] {} ...", index, pending.size(), tile.label());
-            OsmResponse osm = osmDataFetcher.fetchRoadNetwork(tile.bbox(), tile.highwayFilter());
+            OsmResponse osm = roadNetworkSource.fetchRoadNetwork(tile.bbox(), tile.highwayFilter());
 
             int before = osm.getElements() == null ? 0 : (int) osm.getElements().stream().filter(e -> "way".equals(e.getType())).count();
             OsmParser.ParsedGraph parsed = osmParser.parse(osm, tileImporter.seenWayIds());
@@ -89,8 +90,8 @@ public class GraphImporter implements CommandLineRunner {
 
             log.info("[{}/{}] +{} nodes, +{} edges ({} elapsed)", index, pending.size(), r.newNodes(), r.newEdges(),
                      human(Duration.ofNanos(System.nanoTime() - started)));
-            if (index < pending.size()) {
-                Thread.sleep(regionConfig.getImporter().getRequestDelayMillis()); // be polite to the public Overpass server
+            if (index < pending.size() && roadNetworkSource.requestDelayMillis() > 0) {
+                Thread.sleep(roadNetworkSource.requestDelayMillis()); // be polite to a shared public server
             }
         }
 
@@ -104,7 +105,7 @@ public class GraphImporter implements CommandLineRunner {
         log.info("  Nodes : {}", finalNodes);
         log.info("  Edges : {}", finalEdges);
         if (finalEdges < finalNodes) {
-            log.warn("Edge count ({}) is less than node count ({}) — this is unusual. Check the Overpass responses and filters.",
+            log.warn("Edge count ({}) is less than node count ({}) — this is unusual. Check the OSM source data and filters.",
                      finalEdges, finalNodes);
         } else {
             log.info("Sanity check passed (edges > nodes, as expected for a road network).");

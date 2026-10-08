@@ -82,9 +82,23 @@ public class RegionConfig {
         private double tileSizeDegrees = 0.1;
     }
 
-    /** Politeness and robustness settings for talking to the public Overpass API during import. */
+    /** Where the import reads OSM data from, plus politeness/robustness settings for the public Overpass API. */
     @Data
     public static class Importer {
+        /**
+         * "overpass" (default): query the public Overpass API tile by tile. "pbf": read a local .osm.pbf extract
+         * (e.g. from Geofabrik) at {@link #pbfPath} — no network, no rate limits.
+         */
+        private String source = "overpass";
+        /** Path of the .osm.pbf file used when source=pbf. Relative paths resolve against the working directory. */
+        private String pbfPath = "data/region.osm.pbf";
+        /**
+         * Overpass endpoints, tried in rotation: attempt 1 uses the first, a failed attempt moves to the next.
+         * Setting region.importer.urls replaces this list.
+         */
+        private List<String> urls = new ArrayList<>(List.of(
+            "https://overpass-api.de/api/interpreter",
+            "https://overpass.kumi.systems/api/interpreter"));
         /** Overpass rejects anonymous clients; identify the project (and ideally add a contact URL/e-mail). */
         private String userAgent = "WayFinder-portfolio-project/1.0";
         private long requestDelayMillis = 3_000;

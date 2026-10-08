@@ -4,6 +4,7 @@ import com.sashank.map_shortest_path_finder.config.RegionConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -17,6 +18,7 @@ import org.springframework.web.client.RestTemplate;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -26,34 +28,44 @@ import java.util.Set;
  * Built for a long, polite, restartable import against a shared public server:
  *  - every request carries an identifying User-Agent — Overpass answers anonymous/default clients with
  *    "406 Not Acceptable";
+ *  - several endpoints (region.importer.urls) are tried in rotation, one per attempt, so a single overloaded
+ *    server does not sink the import;
  *  - rate limiting (429) and overload (502/503/504) are retried with growing backoff;
  *  - a 200 response whose body carries a "runtime error" remark (Overpass's way of reporting a query that timed
  *    out or ran out of memory, leaving the data PARTIAL) is treated as a failure, never as an empty/complete tile.
  */
 @Service
-public class OsmDataFetcher {
+@ConditionalOnProperty(name = "region.importer.source", havingValue = "overpass", matchIfMissing = true)
+public class OsmDataFetcher implements RoadNetworkSource {
 
     private static final Logger log = LoggerFactory.getLogger(OsmDataFetcher.class);
-    private static final String OVERPASS_URL = "https://overpass-api.de/api/interpreter";
     private static final Set<Integer> RETRYABLE = Set.of(429, 500, 502, 503, 504);
 
     @FunctionalInterface
     interface Sleeper { void sleep(long millis) throws InterruptedException; }
 
     private final RestTemplate restTemplate;
-    private final String url;
+    private final List<String> urls;
     private final RegionConfig.Importer settings;
     private final Sleeper sleeper;
 
     @Autowired
     public OsmDataFetcher(RegionConfig regionConfig) {
-        this(restTemplateFor(regionConfig.getImporter()), OVERPASS_URL, regionConfig.getImporter(), Thread::sleep);
+        this(restTemplateFor(regionConfig.getImporter()), regionConfig.getImporter().getUrls(), regionConfig.getImporter(), Thread::sleep);
     }
 
     /** Test seam: inject the HTTP client, endpoint and a no-op sleeper. */
     OsmDataFetcher(RestTemplate restTemplate, String url, RegionConfig.Importer settings, Sleeper sleeper) {
+        this(restTemplate, List.of(url), settings, sleeper);
+    }
+
+    /** Test seam: as above, with several endpoints to rotate through. */
+    OsmDataFetcher(RestTemplate restTemplate, List<String> urls, RegionConfig.Importer settings, Sleeper sleeper) {
+        if (urls == null || urls.isEmpty()) {
+            throw new IllegalStateException("region.importer.urls must list at least one Overpass endpoint.");
+        }
         this.restTemplate = restTemplate;
-        this.url = url;
+        this.urls = List.copyOf(urls);
         this.settings = settings;
         this.sleeper = sleeper;
     }
@@ -65,6 +77,11 @@ public class OsmDataFetcher {
         return new RestTemplate(factory);
     }
 
+    @Override
+    public long requestDelayMillis() {
+        return settings.getRequestDelayMillis();
+    }
+
     /** Full-detail fetch of one box (the original single-city behaviour). */
     public OsmResponse fetchRoadNetwork(RegionConfig.Bbox bbox) {
         return fetchRoadNetwork(bbox, RegionConfig.FULL_DETAIL_FILTER);
@@ -74,6 +91,7 @@ public class OsmDataFetcher {
      * @param highwayFilter regex matched against the OSM {@code highway} tag (operator-supplied configuration)
      * @throws IllegalStateException if Overpass cannot deliver the tile after all attempts, or delivers a partial one
      */
+    @Override
     public OsmResponse fetchRoadNetwork(RegionConfig.Bbox bbox, String highwayFilter) {
         String query = buildOverpassQuery(bbox.toOverpassFormat(), highwayFilter);
 
@@ -86,6 +104,8 @@ public class OsmDataFetcher {
 
         String lastProblem = "no attempt made";
         for (int attempt = 1; attempt <= settings.getMaxAttempts(); attempt++) {
+            // Rotate endpoints: a failed attempt moves on to the next server, wrapping around after the last
+            String url = urls.get((attempt - 1) % urls.size());
             try {
                 ResponseEntity<OsmResponse> response = restTemplate.postForEntity(url, new HttpEntity<>(body, headers), OsmResponse.class);
                 OsmResponse osm = response.getBody();
@@ -107,9 +127,9 @@ public class OsmDataFetcher {
                     throw new IllegalStateException("Overpass refused the query (HTTP " + status + "): "
                         + abbreviate(e.getResponseBodyAsString()), e);
                 }
-                lastProblem = "HTTP " + status;
+                lastProblem = "HTTP " + status + " from " + url;
             } catch (ResourceAccessException e) {
-                lastProblem = "network/timeout: " + e.getMostSpecificCause().getClass().getSimpleName();
+                lastProblem = "network/timeout from " + url + ": " + e.getMostSpecificCause().getClass().getSimpleName();
             }
 
             if (attempt < settings.getMaxAttempts()) {

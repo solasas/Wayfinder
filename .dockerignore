@@ -1,0 +1,8 @@
+target/
+.git/
+.idea/
+.github/
+.env
+.DS_Store
+**/.DS_Store
+*.md

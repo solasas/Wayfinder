@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A mini Google Maps route planner: users pick start/end points on a real map; the backend runs Dijkstra on an actual OSM road network and returns the route. Built as a portfolio project.
 
-**Region:** Rajahmundry urban core, Andhra Pradesh, India (bbox: 16.96–17.01 N, 81.76–81.82 E).
+**Region:** Vijayawada – Rajahmundry – Visakhapatnam, Andhra Pradesh, India (bbox: 16.45–17.80 N, 80.55–83.35 E): major roads over the whole bbox (`region.corridor.*`) plus full street-level detail in each city core (`region.areas[*]`). Single-city (Rajahmundry only) setup is documented in a comment in `application.properties`.
 
 ## Commands
 
@@ -50,7 +50,10 @@ docker compose up -d
 ```
 Overpass API (OSM)
       │
- OsmDataFetcher      — HTTP POST to overpass-api.de, deserializes JSON → OsmResponse
+ RoadNetworkSource   — region.importer.source: overpass (default) | pbf; both return an Overpass-shaped OsmResponse
+   OsmDataFetcher      — overpass: HTTP POST, rotates region.importer.urls on failed attempts, deserializes JSON → OsmResponse
+   PbfRoadNetworkSource— pbf: reads a local Geofabrik .osm.pbf (osmosis-osm-binary) in two passes per tile; file must be
+                         sorted; IMPORT_SOURCE=pbf, IMPORT_PBF_PATH=data/region.osm.pbf
       │
  OsmParser           — separates nodes/ways, builds Node entities + ParsedEdge records
       │                  (haversine distance as edge weight, handles oneway tags)

@@ -73,6 +73,13 @@
             <artifactId>spring-ai-retry</artifactId>
         </dependency>
 
+        <!-- Reads OpenStreetMap .osm.pbf extracts (e.g. from Geofabrik) for region.importer.source=pbf. -->
+        <dependency>
+            <groupId>org.openstreetmap.osmosis</groupId>
+            <artifactId>osmosis-osm-binary</artifactId>
+            <version>0.48.3</version>
+        </dependency>
+
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>

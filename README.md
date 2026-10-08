@@ -446,7 +446,16 @@ This starts PostgreSQL with PostGIS on `localhost:5433` (not the default 5432 �
 ```bash
 ./mvnw spring-boot:run -Dspring-boot.run.profiles=import
 ```
-Fetches Rajahmundry road data from OpenStreetMap's Overpass API and stores it in the database. Takes ~30–60 seconds. Only needs to run once.
+Fetches Rajahmundry road data from OpenStreetMap's Overpass API and stores it in the database. Takes ~30–60 seconds. Only needs to run once. Overpass is a shared public server and sometimes answers `504`; the importer retries and rotates through the mirrors in `region.importer.urls`.
+
+**Offline alternative — import from a local OpenStreetMap extract (no Overpass):**
+```bash
+brew install osmium-tool                       # one-time
+# download an extract that covers your region from https://download.geofabrik.de/asia/india.html, then clip it:
+osmium extract -b 80.55,16.45,83.35,17.80 india-latest.osm.pbf -o data/region.osm.pbf
+IMPORT_SOURCE=pbf ./mvnw spring-boot:run -Dspring-boot.run.profiles=import
+```
+`-b` is `west,south,east,north` (match `region.bbox.*`). The file path is `IMPORT_PBF_PATH` (default `data/region.osm.pbf`; `data/` is git-ignored). The file must be sorted (Geofabrik's are; otherwise run `osmium sort`). Each tile is a read of the file, so clipping first keeps multi-tile imports fast.
 
 To re-import (clears existing data first):
 ```bash
